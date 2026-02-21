@@ -1,42 +1,50 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 import hashlib
+
+from .database import SessionLocal, engine
+from .models import URL, Base
+
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
-# Request body schema
 class ShortenRequest(BaseModel):
     long_url: str
 
-url_map = {}
+# Dependency to get DB session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-@app.get("/")
-def health_check():
-    return {"status": "ok"}
-
-def generate_Short_Code(long_url) -> str:
-    """
-    Generate a deterministic short code from the long URL
-    """
-    hash_object = hashlib.sha256(long_url.encode())
-    # Take first 6 characters for short code
-    return hash_object.hexdigest()[:6]
+def generate_short_code(long_url: str) -> str:
+    return hashlib.sha256(long_url.encode()).hexdigest()[:6]
 
 @app.post("/shorten")
-def shorten_url(request: ShortenRequest):
-    # dummy short code for now
-    short_code = generate_Short_Code(request.long_url)
-    url_map[short_code] = request.long_url
+def shorten_url(request: ShortenRequest, db: Session = Depends(get_db)):
+    short_code = generate_short_code(request.long_url)
+
+    existing = db.query(URL).filter(URL.short_code == short_code).first()
+    if not existing:
+        url = URL(short_code=short_code, long_url=request.long_url)
+        db.add(url)
+        db.commit()
+
     return {
-        "long_url": request.long_url,
-        "short_code": short_code
+        "short_code": short_code,
+        "long_url": request.long_url
     }
 
 @app.get("/{short_code}")
-def redirect(short_code: str):
-    if short_code not in url_map:
+def redirect(short_code: str, db: Session = Depends(get_db)):
+    url = db.query(URL).filter(URL.short_code == short_code).first()
+
+    if not url:
         raise HTTPException(status_code=404, detail="Short URL not found")
-    
-    long_url = url_map[short_code]
-    return RedirectResponse(url=long_url)
+
+    return RedirectResponse(url=url.long_url)
